@@ -3,6 +3,7 @@ import pronotepy
 from datetime import datetime, timedelta
 import os
 from dotenv import load_dotenv
+import json
 
 # Charger les variables d'environnement
 load_dotenv()
@@ -14,51 +15,103 @@ def home():
     return jsonify({
         "status": "API Pronote opérationnelle",
         "endpoints": {
-            "/homework": "GET - Récupérer les devoirs",
+            "/homework": "GET - Récupérer les devoirs avec QR Code",
+            "/test-qr": "GET - Tester la connexion QR Code",
             "/health": "GET - Vérifier le statut"
         },
-        "version": "1.0.0"
+        "version": "2.0.0 - QR Code Support"
     })
 
 @app.route('/health')
 def health():
     return jsonify({
         "status": "healthy",
-        "timestamp": datetime.now().isoformat()
+        "timestamp": datetime.now().isoformat(),
+        "qr_configured": bool(os.getenv('PRONOTE_QR_DATA'))
     })
+
+@app.route('/test-qr')
+def test_qr():
+    """Test de connexion avec QR Code"""
+    try:
+        # Récupérer les données QR depuis les variables d'environnement
+        qr_data_str = os.getenv('PRONOTE_QR_DATA')
+        if not qr_data_str:
+            return jsonify({
+                "error": "QR_DATA non configuré",
+                "help": "Ajoutez PRONOTE_QR_DATA dans les variables d'environnement"
+            }), 400
+        
+        # Parser les données JSON
+        qr_data = json.loads(qr_data_str)
+        confirmation_code = request.args.get('code', '1234')
+        
+        print(f"Test connexion QR Code avec code: {confirmation_code}")
+        print(f"URL: {qr_data.get('url')}")
+        print(f"Login: {qr_data.get('login')[:10]}...")
+        
+        # Tentative de connexion
+        client = pronotepy.Client.qrcode_login(qr_data, confirmation_code)
+        
+        if client.logged_in:
+            student_name = getattr(client.info, 'name', 'Nom non disponible')
+            return jsonify({
+                "success": True,
+                "message": "Connexion QR Code réussie",
+                "student": student_name,
+                "url": qr_data.get('url')
+            })
+        else:
+            return jsonify({
+                "success": False,
+                "message": "Échec de connexion QR Code",
+                "help": "Vérifiez le code de confirmation ou régénérez le QR Code"
+            }), 401
+            
+    except json.JSONDecodeError:
+        return jsonify({
+            "error": "Format QR_DATA invalide",
+            "help": "PRONOTE_QR_DATA doit être un JSON valide"
+        }), 400
+    except Exception as e:
+        print(f"Erreur test QR: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "help": "Le QR Code a peut-être expiré (10 min), régénérez-le"
+        }), 500
 
 @app.route('/homework')
 def get_homework():
     try:
-        # Récupérer les paramètres
-        pronote_url = request.args.get('url') or os.getenv('PRONOTE_URL')
-        username = request.args.get('username') or os.getenv('PRONOTE_USERNAME')
-        password = request.args.get('password') or os.getenv('PRONOTE_PASSWORD')
-        days = int(request.args.get('days', 7))
-        
-        # Vérifier les paramètres obligatoires
-        if not all([pronote_url, username, password]):
+        # Récupérer les données QR
+        qr_data_str = os.getenv('PRONOTE_QR_DATA')
+        if not qr_data_str:
             return jsonify({
-                "error": "Paramètres manquants",
-                "required": ["url", "username", "password"],
-                "help": "Passez les paramètres en query string ou variables d'environnement"
+                "error": "QR_DATA non configuré",
+                "help": "Configurez PRONOTE_QR_DATA dans les variables d'environnement"
             }), 400
         
-        # Connexion à Pronote
-        print(f"Tentative de connexion à {pronote_url} avec {username}")
-        client = pronotepy.Client(pronote_url, username=username, password=password)
+        qr_data = json.loads(qr_data_str)
+        confirmation_code = request.args.get('code', '1234')
+        days = int(request.args.get('days', 7))
+        
+        print(f"Récupération devoirs avec QR Code - {days} jours")
+        
+        # Connexion avec QR Code
+        client = pronotepy.Client.qrcode_login(qr_data, confirmation_code)
         
         if not client.logged_in:
             return jsonify({
-                "error": "Échec de connexion à Pronote",
-                "details": "Vérifiez vos identifiants et l'URL"
+                "error": "Échec de connexion QR Code",
+                "help": "Le QR Code a peut-être expiré ou le code de confirmation est incorrect"
             }), 401
         
-        print("✅ Connexion réussie à Pronote")
+        print("✅ Connexion QR Code réussie")
         
         # Récupérer les informations de l'élève
         student_info = {
-            "name": client.info.name if hasattr(client.info, 'name') else "Non disponible",
+            "name": getattr(client.info, 'name', 'Non disponible'),
             "class": getattr(client.info, 'class_name', 'Non disponible')
         }
         
@@ -103,18 +156,26 @@ def get_homework():
             "homework": homework_list,
             "stats": stats,
             "sync_date": datetime.now().isoformat(),
-            "days_requested": days
+            "days_requested": days,
+            "connection_method": "QR_CODE"
         }
         
         print(f"✅ Récupération terminée: {len(homework_list)} devoirs")
         return jsonify(result)
+        
+    except json.JSONDecodeError:
+        return jsonify({
+            "error": "Format QR_DATA invalide",
+            "message": "Les données QR Code ne sont pas au format JSON valide"
+        }), 400
         
     except pronotepy.exceptions.PronoteAPIError as e:
         print(f"❌ Erreur API Pronote: {str(e)}")
         return jsonify({
             "error": "Erreur API Pronote",
             "message": str(e),
-            "type": "PronoteAPIError"
+            "type": "PronoteAPIError",
+            "help": "Le QR Code a peut-être expiré, régénérez-le"
         }), 500
         
     except Exception as e:
@@ -125,38 +186,21 @@ def get_homework():
             "type": "ServerError"
         }), 500
 
-@app.route('/test-connection')
-def test_connection():
-    """Endpoint pour tester la connexion Pronote"""
-    try:
-        pronote_url = request.args.get('url') or os.getenv('PRONOTE_URL')
-        username = request.args.get('username') or os.getenv('PRONOTE_USERNAME')
-        password = request.args.get('password') or os.getenv('PRONOTE_PASSWORD')
-        
-        if not all([pronote_url, username, password]):
-            return jsonify({
-                "error": "Paramètres manquants pour le test"
-            }), 400
-        
-        client = pronotepy.Client(pronote_url, username=username, password=password)
-        
-        if client.logged_in:
-            return jsonify({
-                "success": True,
-                "message": "Connexion Pronote réussie",
-                "student": client.info.name if hasattr(client.info, 'name') else "Nom non disponible"
-            })
-        else:
-            return jsonify({
-                "success": False,
-                "message": "Échec de connexion"
-            }), 401
-            
-    except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
+@app.route('/refresh-qr')
+def refresh_qr():
+    """Endpoint pour indiquer comment renouveler le QR Code"""
+    return jsonify({
+        "message": "Pour renouveler le QR Code:",
+        "steps": [
+            "1. Connectez-vous à Pronote via votre ENT",
+            "2. Générez un nouveau QR Code",
+            "3. Extrayez les nouvelles données JSON",
+            "4. Mettez à jour la variable PRONOTE_QR_DATA sur Render",
+            "5. Redémarrez le service Render"
+        ],
+        "current_qr_configured": bool(os.getenv('PRONOTE_QR_DATA')),
+        "validity": "Les QR Codes expirent après 10 minutes"
+    })
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
