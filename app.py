@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 import os
 from dotenv import load_dotenv
 import json
+import uuid as uuid_module
 
 # Charger les variables d'environnement
 load_dotenv()
@@ -19,7 +20,7 @@ def home():
             "/test-qr": "GET - Tester la connexion QR Code",
             "/health": "GET - Vérifier le statut"
         },
-        "version": "2.0.0 - QR Code Support"
+        "version": "2.1.0 - QR Code Support avec UUID"
     })
 
 @app.route('/health')
@@ -46,12 +47,16 @@ def test_qr():
         qr_data = json.loads(qr_data_str)
         confirmation_code = request.args.get('code', '1234')
         
+        # Générer un UUID unique pour cette session
+        session_uuid = str(uuid_module.uuid4())
+        
         print(f"Test connexion QR Code avec code: {confirmation_code}")
+        print(f"UUID généré: {session_uuid}")
         print(f"URL: {qr_data.get('url')}")
         print(f"Login: {qr_data.get('login')[:10]}...")
         
-        # Tentative de connexion
-        client = pronotepy.Client.qrcode_login(qr_data, confirmation_code)
+        # Tentative de connexion avec UUID
+        client = pronotepy.Client.qrcode_login(qr_data, confirmation_code, session_uuid)
         
         if client.logged_in:
             student_name = getattr(client.info, 'name', 'Nom non disponible')
@@ -59,7 +64,8 @@ def test_qr():
                 "success": True,
                 "message": "Connexion QR Code réussie",
                 "student": student_name,
-                "url": qr_data.get('url')
+                "url": qr_data.get('url'),
+                "uuid": session_uuid
             })
         else:
             return jsonify({
@@ -96,10 +102,14 @@ def get_homework():
         confirmation_code = request.args.get('code', '1234')
         days = int(request.args.get('days', 7))
         
-        print(f"Récupération devoirs avec QR Code - {days} jours")
+        # Générer un UUID unique pour cette session
+        session_uuid = str(uuid_module.uuid4())
         
-        # Connexion avec QR Code
-        client = pronotepy.Client.qrcode_login(qr_data, confirmation_code)
+        print(f"Récupération devoirs avec QR Code - {days} jours")
+        print(f"UUID: {session_uuid}")
+        
+        # Connexion avec QR Code et UUID
+        client = pronotepy.Client.qrcode_login(qr_data, confirmation_code, session_uuid)
         
         if not client.logged_in:
             return jsonify({
@@ -157,7 +167,8 @@ def get_homework():
             "stats": stats,
             "sync_date": datetime.now().isoformat(),
             "days_requested": days,
-            "connection_method": "QR_CODE"
+            "connection_method": "QR_CODE",
+            "session_uuid": session_uuid
         }
         
         print(f"✅ Récupération terminée: {len(homework_list)} devoirs")
