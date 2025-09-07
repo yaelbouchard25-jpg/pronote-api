@@ -3,8 +3,6 @@ import pronotepy
 from datetime import datetime, timedelta
 import os
 from dotenv import load_dotenv
-import json
-import uuid as uuid_module
 
 # Charger les variables d'environnement
 load_dotenv()
@@ -16,11 +14,12 @@ def home():
     return jsonify({
         "status": "API Pronote opérationnelle",
         "endpoints": {
-            "/homework": "GET - Récupérer les devoirs avec QR Code",
-            "/test-qr": "GET - Tester la connexion QR Code",
+            "/homework": "GET - Récupérer les devoirs",
+            "/test-connection": "GET - Tester la connexion",
             "/health": "GET - Vérifier le statut"
         },
-        "version": "2.1.0 - QR Code Support avec UUID"
+        "version": "3.0.0 - Identifiants directs + ENT Support",
+        "supported_methods": ["direct_credentials", "ent_connection"]
     })
 
 @app.route('/health')
@@ -28,96 +27,182 @@ def health():
     return jsonify({
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "qr_configured": bool(os.getenv('PRONOTE_QR_DATA'))
+        "credentials_configured": bool(os.getenv('PRONOTE_USERNAME') and os.getenv('PRONOTE_PASSWORD')),
+        "url_configured": bool(os.getenv('PRONOTE_URL'))
     })
 
-@app.route('/test-qr')
-def test_qr():
-    """Test de connexion avec QR Code"""
+@app.route('/test-connection')
+def test_connection():
+    """Test de connexion avec identifiants directs ou ENT"""
     try:
-        # Récupérer les données QR depuis les variables d'environnement
-        qr_data_str = os.getenv('PRONOTE_QR_DATA')
-        if not qr_data_str:
+        # Récupérer les paramètres
+        pronote_url = request.args.get('url') or os.getenv('PRONOTE_URL')
+        username = request.args.get('username') or os.getenv('PRONOTE_USERNAME') 
+        password = request.args.get('password') or os.getenv('PRONOTE_PASSWORD')
+        
+        # Vérifier les paramètres obligatoires
+        if not all([pronote_url, username, password]):
             return jsonify({
-                "error": "QR_DATA non configuré",
-                "help": "Ajoutez PRONOTE_QR_DATA dans les variables d'environnement"
+                "error": "Paramètres manquants",
+                "required": ["url", "username", "password"],
+                "help": "Configurez PRONOTE_URL, PRONOTE_USERNAME, PRONOTE_PASSWORD"
             }), 400
         
-        # Parser les données JSON
-        qr_data = json.loads(qr_data_str)
-        confirmation_code = request.args.get('code', '1234')
+        print(f"Test connexion à {pronote_url} avec {username}")
         
-        # Générer un UUID unique pour cette session
-        session_uuid = str(uuid_module.uuid4())
+        # Tentative de connexion directe d'abord
+        try:
+            client = pronotepy.Client(pronote_url, username=username, password=password)
+            connection_method = "direct"
+        except Exception as direct_error:
+            print(f"Connexion directe échouée: {direct_error}")
+            
+            # Essayer avec différents ENT de Normandie
+            ent_functions = []
+            
+            # Importer les fonctions ENT disponibles
+            try:
+                from pronotepy.ent import cas_arsene76
+                ent_functions.append(("cas_arsene76", cas_arsene76))
+            except ImportError:
+                pass
+                
+            try:
+                from pronotepy.ent import cas_ent27  
+                ent_functions.append(("cas_ent27", cas_ent27))
+            except ImportError:
+                pass
+                
+            try:
+                from pronotepy.ent import ent_normandie
+                ent_functions.append(("ent_normandie", ent_normandie))
+            except ImportError:
+                pass
+            
+            # Essayer chaque fonction ENT
+            client = None
+            connection_method = None
+            
+            for ent_name, ent_func in ent_functions:
+                try:
+                    print(f"Tentative avec {ent_name}")
+                    client = pronotepy.Client(pronote_url, username=username, password=password, ent=ent_func)
+                    if client.logged_in:
+                        connection_method = f"ent_{ent_name}"
+                        print(f"✅ Connexion réussie avec {ent_name}")
+                        break
+                except Exception as ent_error:
+                    print(f"Échec {ent_name}: {ent_error}")
+                    continue
+            
+            # Si aucune méthode n'a fonctionné
+            if not client or not client.logged_in:
+                return jsonify({
+                    "success": False,
+                    "message": "Échec de connexion avec toutes les méthodes",
+                    "tried_methods": ["direct"] + [name for name, _ in ent_functions],
+                    "help": "Vérifiez vos identifiants ou contactez votre établissement"
+                }), 401
         
-        print(f"Test connexion QR Code avec code: {confirmation_code}")
-        print(f"UUID généré: {session_uuid}")
-        print(f"URL: {qr_data.get('url')}")
-        print(f"Login: {qr_data.get('login')[:10]}...")
-        
-        # Tentative de connexion avec UUID
-        client = pronotepy.Client.qrcode_login(qr_data, confirmation_code, session_uuid)
-        
+        # Test réussi
         if client.logged_in:
             student_name = getattr(client.info, 'name', 'Nom non disponible')
+            student_class = getattr(client.info, 'class_name', 'Classe non disponible')
+            
             return jsonify({
                 "success": True,
-                "message": "Connexion QR Code réussie",
-                "student": student_name,
-                "url": qr_data.get('url'),
-                "uuid": session_uuid
+                "message": "Connexion réussie",
+                "student": {
+                    "name": student_name,
+                    "class": student_class
+                },
+                "connection_method": connection_method,
+                "url": pronote_url
             })
         else:
             return jsonify({
                 "success": False,
-                "message": "Échec de connexion QR Code",
-                "help": "Vérifiez le code de confirmation ou régénérez le QR Code"
+                "message": "Connexion échouée",
+                "help": "Vérifiez vos identifiants"
             }), 401
             
-    except json.JSONDecodeError:
-        return jsonify({
-            "error": "Format QR_DATA invalide",
-            "help": "PRONOTE_QR_DATA doit être un JSON valide"
-        }), 400
     except Exception as e:
-        print(f"Erreur test QR: {str(e)}")
+        print(f"Erreur test connexion: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e),
-            "help": "Le QR Code a peut-être expiré (10 min), régénérez-le"
+            "help": "Erreur lors du test de connexion"
         }), 500
 
 @app.route('/homework')
 def get_homework():
     try:
-        # Récupérer les données QR
-        qr_data_str = os.getenv('PRONOTE_QR_DATA')
-        if not qr_data_str:
-            return jsonify({
-                "error": "QR_DATA non configuré",
-                "help": "Configurez PRONOTE_QR_DATA dans les variables d'environnement"
-            }), 400
-        
-        qr_data = json.loads(qr_data_str)
-        confirmation_code = request.args.get('code', '1234')
+        # Récupérer les paramètres
+        pronote_url = request.args.get('url') or os.getenv('PRONOTE_URL')
+        username = request.args.get('username') or os.getenv('PRONOTE_USERNAME')
+        password = request.args.get('password') or os.getenv('PRONOTE_PASSWORD')
         days = int(request.args.get('days', 7))
         
-        # Générer un UUID unique pour cette session
-        session_uuid = str(uuid_module.uuid4())
-        
-        print(f"Récupération devoirs avec QR Code - {days} jours")
-        print(f"UUID: {session_uuid}")
-        
-        # Connexion avec QR Code et UUID
-        client = pronotepy.Client.qrcode_login(qr_data, confirmation_code, session_uuid)
-        
-        if not client.logged_in:
+        # Vérifier les paramètres obligatoires
+        if not all([pronote_url, username, password]):
             return jsonify({
-                "error": "Échec de connexion QR Code",
-                "help": "Le QR Code a peut-être expiré ou le code de confirmation est incorrect"
-            }), 401
+                "error": "Paramètres manquants",
+                "help": "Configurez PRONOTE_URL, PRONOTE_USERNAME, PRONOTE_PASSWORD"
+            }), 400
         
-        print("✅ Connexion QR Code réussie")
+        print(f"Récupération devoirs - {days} jours")
+        
+        # Connexion (même logique que test-connection)
+        client = None
+        connection_method = None
+        
+        # Tentative connexion directe
+        try:
+            client = pronotepy.Client(pronote_url, username=username, password=password)
+            connection_method = "direct"
+            print("✅ Connexion directe réussie")
+        except Exception as direct_error:
+            print(f"Connexion directe échouée: {direct_error}")
+            
+            # Essayer avec ENT
+            ent_functions = []
+            
+            try:
+                from pronotepy.ent import cas_arsene76
+                ent_functions.append(("cas_arsene76", cas_arsene76))
+            except ImportError:
+                pass
+                
+            try:
+                from pronotepy.ent import cas_ent27  
+                ent_functions.append(("cas_ent27", cas_ent27))
+            except ImportError:
+                pass
+            
+            # Essayer avec ENT Auvergne-Rhône-Alpes spécifiquement
+            ent_functions = []
+            
+            # D'abord essayer les ENT spécifiques à votre région
+            try:
+                from pronotepy.ent import _cas
+                # Fonction CAS spécifique pour Auvergne-Rhône-Alpes
+                cas_ara = lambda: _cas("https://cas.ent.auvergnerhonealpes.fr/login")
+                ent_functions.append(("cas_auvergne_rhone_alpes", cas_ara))
+            except ImportError:
+                pass
+            
+            # Essayer d'autres ENT CAS similaires
+            try:
+                from pronotepy.ent import occitanie_montpellier
+                ent_functions.append(("occitanie_montpellier", occitanie_montpellier))
+            except ImportError:
+                pass
+        
+        if not client or not client.logged_in:
+            return jsonify({
+                "error": "Échec de connexion",
+                "help": "Impossible de se connecter avec les identifiants fournis"
+            }), 401
         
         # Récupérer les informations de l'élève
         student_info = {
@@ -167,26 +252,18 @@ def get_homework():
             "stats": stats,
             "sync_date": datetime.now().isoformat(),
             "days_requested": days,
-            "connection_method": "QR_CODE",
-            "session_uuid": session_uuid
+            "connection_method": connection_method
         }
         
         print(f"✅ Récupération terminée: {len(homework_list)} devoirs")
         return jsonify(result)
-        
-    except json.JSONDecodeError:
-        return jsonify({
-            "error": "Format QR_DATA invalide",
-            "message": "Les données QR Code ne sont pas au format JSON valide"
-        }), 400
         
     except pronotepy.exceptions.PronoteAPIError as e:
         print(f"❌ Erreur API Pronote: {str(e)}")
         return jsonify({
             "error": "Erreur API Pronote",
             "message": str(e),
-            "type": "PronoteAPIError",
-            "help": "Le QR Code a peut-être expiré, régénérez-le"
+            "type": "PronoteAPIError"
         }), 500
         
     except Exception as e:
@@ -197,20 +274,37 @@ def get_homework():
             "type": "ServerError"
         }), 500
 
-@app.route('/refresh-qr')
-def refresh_qr():
-    """Endpoint pour indiquer comment renouveler le QR Code"""
+@app.route('/setup-help')
+def setup_help():
+    """Guide pour obtenir les identifiants"""
     return jsonify({
-        "message": "Pour renouveler le QR Code:",
-        "steps": [
-            "1. Connectez-vous à Pronote via votre ENT",
-            "2. Générez un nouveau QR Code",
-            "3. Extrayez les nouvelles données JSON",
-            "4. Mettez à jour la variable PRONOTE_QR_DATA sur Render",
-            "5. Redémarrez le service Render"
+        "message": "Comment obtenir vos identifiants Pronote directs",
+        "methods": [
+            {
+                "method": "Demande à l'établissement",
+                "steps": [
+                    "Contactez le secrétariat ou la vie scolaire",
+                    "Demandez vos 'identifiants Pronote directs'",
+                    "Expliquez que c'est pour l'application mobile",
+                    "Ils vous fourniront: URL, nom d'utilisateur, mot de passe"
+                ]
+            },
+            {
+                "method": "Via l'ENT", 
+                "steps": [
+                    "Connectez-vous à Pronote via votre ENT",
+                    "Cherchez 'Mes données' ou 'Mon compte'",
+                    "Parfois les identifiants directs y sont affichés"
+                ]
+            }
         ],
-        "current_qr_configured": bool(os.getenv('PRONOTE_QR_DATA')),
-        "validity": "Les QR Codes expirent après 10 minutes"
+        "what_to_ask": "Bonjour, j'aimerais accéder à Pronote directement sans passer par l'ENT pour utiliser l'application mobile. Pourriez-vous me communiquer mes identifiants Pronote directs (URL, nom d'utilisateur, mot de passe) ?",
+        "auvergne_rhone_alpes_info": {
+            "ent_url": "https://cas.ent.auvergnerhonealpes.fr/login",
+            "pronote_url": "https://0010010f.index-education.net/pronote/eleve.html",
+            "platform": "SKOLENGO",
+            "exploitant": "KOSMOS"
+        }
     })
 
 if __name__ == '__main__':
