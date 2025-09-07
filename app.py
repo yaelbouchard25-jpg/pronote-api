@@ -258,7 +258,7 @@ def get_homework():
 def debug_ent():
     """Endpoint de debug pour l'ENT"""
     try:
-        ent_func = cas_auvergne_rhone_alpes()
+        ent_func = get_cas_auvergne_rhone_alpes()
         return jsonify({
             "ent_function_available": ent_func is not None,
             "ent_url": "https://cas.ent.auvergnerhonealpes.fr/login",
