@@ -3,20 +3,27 @@ import pronotepy
 from datetime import datetime, timedelta
 import os
 from dotenv import load_dotenv
+from functools import partial
 
 # Charger les variables d'environnement
 load_dotenv()
 
 app = Flask(__name__)
 
-def cas_auvergne_rhone_alpes():
+# Fonction ENT globale
+def get_cas_auvergne_rhone_alpes():
     """Fonction CAS spécifique pour Auvergne-Rhône-Alpes"""
     try:
         from pronotepy.ent.generic_func import _cas
-        return _cas("https://cas.ent.auvergnerhonealpes.fr/login")
+        # Créer une fonction partielle avec l'URL CAS
+        return partial(_cas, url="https://cas.ent.auvergnerhonealpes.fr/login")
     except ImportError:
-        # Fallback si l'import ne fonctionne pas
-        return None
+        # Fallback - essayer d'autres méthodes
+        try:
+            from pronotepy.ent import occitanie_montpellier
+            return occitanie_montpellier
+        except ImportError:
+            return None
 
 @app.route('/')
 def home():
@@ -25,9 +32,10 @@ def home():
         "endpoints": {
             "/homework": "GET - Récupérer les devoirs",
             "/test-connection": "GET - Tester la connexion",
-            "/health": "GET - Vérifier le statut"
+            "/health": "GET - Vérifier le statut",
+            "/debug-ent": "GET - Debug ENT"
         },
-        "version": "3.1.0 - ENT Auvergne-Rhône-Alpes",
+        "version": "3.2.0 - ENT Auvergne-Rhône-Alpes Fixed",
         "ent_configured": "CAS Auvergne-Rhône-Alpes"
     })
 
@@ -40,6 +48,29 @@ def health():
         "url_configured": bool(os.getenv('PRONOTE_URL')),
         "ent_region": "Auvergne-Rhône-Alpes"
     })
+
+@app.route('/debug-ent')
+def debug_ent():
+    """Endpoint de debug pour l'ENT"""
+    try:
+        ent_func = get_cas_auvergne_rhone_alpes()
+        return jsonify({
+            "ent_function_available": ent_func is not None,
+            "ent_url": "https://cas.ent.auvergnerhonealpes.fr/login",
+            "pronotepy_version": getattr(pronotepy, '__version__', "unknown"),
+            "environment_vars": {
+                "PRONOTE_URL": bool(os.getenv('PRONOTE_URL')),
+                "PRONOTE_USERNAME": bool(os.getenv('PRONOTE_USERNAME')),
+                "PRONOTE_PASSWORD": bool(os.getenv('PRONOTE_PASSWORD'))
+            },
+            "function_type": str(type(ent_func)) if ent_func else "None"
+        })
+    except Exception as e:
+        return jsonify({
+            "error": str(e),
+            "help": "Erreur lors du debug ENT",
+            "traceback": str(e.__class__.__name__)
+        }), 500
 
 @app.route('/test-connection')
 def test_connection():
@@ -55,41 +86,57 @@ def test_connection():
             return jsonify({
                 "error": "Paramètres manquants",
                 "required": ["url", "username", "password"],
-                "help": "Configurez PRONOTE_URL, PRONOTE_USERNAME, PRONOTE_PASSWORD"
+                "help": "Configurez PRONOTE_URL, PRONOTE_USERNAME, PRONOTE_PASSWORD",
+                "current_config": {
+                    "url": bool(pronote_url),
+                    "username": bool(username), 
+                    "password": bool(password)
+                }
             }), 400
         
         print(f"Test connexion à {pronote_url} avec {username}")
         
         # Essayer d'abord la connexion directe
+        client = None
+        connection_method = None
+        error_messages = []
+        
         try:
             print("Tentative de connexion directe...")
             client = pronotepy.Client(pronote_url, username=username, password=password)
             if client.logged_in:
-                print("✅ Connexion directe réussie")
+                print("Connexion directe réussie")
                 connection_method = "direct"
             else:
                 client = None
+                error_messages.append("Connexion directe: échec (logged_in = False)")
         except Exception as direct_error:
-            print(f"Connexion directe échouée: {direct_error}")
+            error_msg = f"Connexion directe échouée: {str(direct_error)}"
+            print(error_msg)
+            error_messages.append(error_msg)
             client = None
         
         # Si la connexion directe échoue, essayer avec l'ENT
         if not client or not client.logged_in:
             print("Tentative avec ENT Auvergne-Rhône-Alpes...")
             try:
-                ent_func = cas_auvergne_rhone_alpes()
+                ent_func = get_cas_auvergne_rhone_alpes()
                 if ent_func:
+                    print("Fonction ENT trouvée, tentative de connexion...")
                     client = pronotepy.Client(pronote_url, username=username, password=password, ent=ent_func)
                     if client.logged_in:
-                        print("✅ Connexion ENT réussie")
+                        print("Connexion ENT réussie")
                         connection_method = "ent_auvergne_rhone_alpes"
                     else:
                         client = None
+                        error_messages.append("Connexion ENT: échec (logged_in = False)")
                 else:
-                    print("Fonction ENT non disponible")
+                    error_messages.append("Fonction ENT non disponible")
                     client = None
             except Exception as ent_error:
-                print(f"Échec ENT Auvergne-Rhône-Alpes: {ent_error}")
+                error_msg = f"Échec ENT Auvergne-Rhône-Alpes: {str(ent_error)}"
+                print(error_msg)
+                error_messages.append(error_msg)
                 client = None
         
         # Vérifier le résultat final
@@ -113,6 +160,7 @@ def test_connection():
                 "success": False,
                 "message": "Échec de connexion avec toutes les méthodes",
                 "tried_methods": ["direct", "ent_auvergne_rhone_alpes"],
+                "error_details": error_messages,
                 "help": "Vérifiez vos identifiants ENT ou contactez votre établissement",
                 "debug_info": {
                     "url": pronote_url,
@@ -125,7 +173,8 @@ def test_connection():
         return jsonify({
             "success": False,
             "error": str(e),
-            "help": "Erreur lors du test de connexion"
+            "help": "Erreur lors du test de connexion",
+            "type": str(e.__class__.__name__)
         }), 500
 
 @app.route('/homework')
@@ -155,7 +204,7 @@ def get_homework():
             client = pronotepy.Client(pronote_url, username=username, password=password)
             if client.logged_in:
                 connection_method = "direct"
-                print("✅ Connexion directe réussie")
+                print("Connexion directe réussie")
             else:
                 client = None
         except Exception as direct_error:
@@ -165,12 +214,12 @@ def get_homework():
         # Tentative avec ENT si nécessaire
         if not client or not client.logged_in:
             try:
-                ent_func = cas_auvergne_rhone_alpes()
+                ent_func = get_cas_auvergne_rhone_alpes()
                 if ent_func:
                     client = pronotepy.Client(pronote_url, username=username, password=password, ent=ent_func)
                     if client.logged_in:
                         connection_method = "ent_auvergne_rhone_alpes"
-                        print("✅ Connexion ENT réussie")
+                        print("Connexion ENT réussie")
                     else:
                         client = None
             except Exception as ent_error:
@@ -235,11 +284,11 @@ def get_homework():
             "ent_region": "Auvergne-Rhône-Alpes"
         }
         
-        print(f"✅ Récupération terminée: {len(homework_list)} devoirs")
+        print(f"Récupération terminée: {len(homework_list)} devoirs")
         return jsonify(result)
         
     except pronotepy.exceptions.PronoteAPIError as e:
-        print(f"❌ Erreur API Pronote: {str(e)}")
+        print(f"Erreur API Pronote: {str(e)}")
         return jsonify({
             "error": "Erreur API Pronote",
             "message": str(e),
@@ -247,32 +296,11 @@ def get_homework():
         }), 500
         
     except Exception as e:
-        print(f"❌ Erreur générale: {str(e)}")
+        print(f"Erreur générale: {str(e)}")
         return jsonify({
             "error": "Erreur serveur",
             "message": str(e),
             "type": "ServerError"
-        }), 500
-
-@app.route('/debug-ent')
-def debug_ent():
-    """Endpoint de debug pour l'ENT"""
-    try:
-        ent_func = get_cas_auvergne_rhone_alpes()
-        return jsonify({
-            "ent_function_available": ent_func is not None,
-            "ent_url": "https://cas.ent.auvergnerhonealpes.fr/login",
-            "pronotepy_version": pronotepy.__version__ if hasattr(pronotepy, '__version__') else "unknown",
-            "environment_vars": {
-                "PRONOTE_URL": bool(os.getenv('PRONOTE_URL')),
-                "PRONOTE_USERNAME": bool(os.getenv('PRONOTE_USERNAME')),
-                "PRONOTE_PASSWORD": bool(os.getenv('PRONOTE_PASSWORD'))
-            }
-        })
-    except Exception as e:
-        return jsonify({
-            "error": str(e),
-            "help": "Erreur lors du debug ENT"
         }), 500
 
 if __name__ == '__main__':
